@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"maps"
 	"slices"
 	"sync"
+	"time"
 
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
 )
@@ -20,10 +22,6 @@ type Topology struct {
 	Topologies  map[string][]string `json:"topology"`
 }
 
-//	type TopologyList struct {
-//		MessageType string `json:"type"`
-//		Topologies TologyList `json:"message"`
-//	}
 type State struct {
 	sync.RWMutex
 	Messages  map[int]struct{}
@@ -37,12 +35,44 @@ func NewState() *State {
 	}
 }
 
+// propagate reads new messages off the queue and sends each one to every
+// neighbor, retrying each neighbor until it replies with broadcast_ok.
+func propagate(n *maelstrom.Node, state *State, queue <-chan int) {
+	for message := range queue {
+		// Copy the neighbors so we don't hold the lock while sending.
+		state.RLock()
+		neighbors := slices.Clone(state.Neighbors)
+		state.RUnlock()
+
+		body := Broadcast{MessageType: "broadcast", Message: message}
+		for _, neighbor := range neighbors {
+			// One goroutine per neighbor, so a slow or partitioned neighbor
+			// doesn't hold up delivery to the others or block the queue.
+			go sendUntilAcked(n, neighbor, body)
+		}
+	}
+}
+
+// sendUntilAcked sends body to dest and retries until it gets broadcast_ok.
+func sendUntilAcked(n *maelstrom.Node, dest string, body Broadcast) {
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		resp, err := n.SyncRPC(ctx, dest, body)
+		cancel()
+		if err == nil && resp.Type() == "broadcast_ok" {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
 func main() {
 	n := maelstrom.NewNode()
 
-	// messages := make(map[int]struct{})
-	// var neighbors []string
 	state := NewState()
+
+	queue := make(chan int, 1000)
+	go propagate(n, state, queue)
 
 	n.Handle("broadcast", func(msg maelstrom.Message) error {
 		var broadcast Broadcast
@@ -50,14 +80,12 @@ func main() {
 			return err
 		}
 		state.Lock()
-		defer state.Unlock()
 		_, alreadyReceived := state.Messages[broadcast.Message]
-		if !alreadyReceived {
-			for _, neighbor := range state.Neighbors {
-				n.Send(neighbor, msg.Body)
-			}
-		}
 		state.Messages[broadcast.Message] = struct{}{}
+		state.Unlock()
+		if !alreadyReceived {
+			queue <- broadcast.Message
+		}
 
 		resp := map[string]any{
 			"type": "broadcast_ok",
