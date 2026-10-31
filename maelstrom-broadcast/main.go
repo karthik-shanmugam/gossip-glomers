@@ -28,6 +28,11 @@ type State struct {
 	Neighbors []string
 }
 
+type Propagation struct {
+	Message int
+	Src     string
+}
+
 func NewState() *State {
 	return &State{
 		Messages:  make(map[int]struct{}),
@@ -37,18 +42,18 @@ func NewState() *State {
 
 // propagate reads new messages off the queue and sends each one to every
 // neighbor, retrying each neighbor until it replies with broadcast_ok.
-func propagate(n *maelstrom.Node, state *State, queue <-chan int) {
-	for message := range queue {
+func propagate(n *maelstrom.Node, state *State, queue <-chan Propagation) {
+	for propagation := range queue {
 		// Copy the neighbors so we don't hold the lock while sending.
 		state.RLock()
 		neighbors := slices.Clone(state.Neighbors)
 		state.RUnlock()
 
-		body := Broadcast{MessageType: "broadcast", Message: message}
+		body := Broadcast{MessageType: "broadcast", Message: propagation.Message}
 		for _, neighbor := range neighbors {
-			// One goroutine per neighbor, so a slow or partitioned neighbor
-			// doesn't hold up delivery to the others or block the queue.
-			go sendUntilAcked(n, neighbor, body)
+			if neighbor != propagation.Src {
+				go sendUntilAcked(n, neighbor, body)
+			}
 		}
 	}
 }
@@ -71,7 +76,7 @@ func main() {
 
 	state := NewState()
 
-	queue := make(chan int, 1000)
+	queue := make(chan Propagation, 1000)
 	go propagate(n, state, queue)
 
 	n.Handle("broadcast", func(msg maelstrom.Message) error {
@@ -84,7 +89,7 @@ func main() {
 		state.Messages[broadcast.Message] = struct{}{}
 		state.Unlock()
 		if !alreadyReceived {
-			queue <- broadcast.Message
+			queue <- Propagation{Message: broadcast.Message, Src: msg.Src}
 		}
 
 		resp := map[string]any{
@@ -103,14 +108,19 @@ func main() {
 		return n.Reply(msg, resp)
 	})
 
+	// Ignore Maelstrom's suggested grid and use a star: the lowest node ID is
+	// the hub and is connected to every other node; everyone else only talks
+	// to the hub. Every node computes the same hub from the shared node list.
 	n.Handle("topology", func(msg maelstrom.Message) error {
-		var topology Topology
-		if err := json.Unmarshal(msg.Body, &topology); err != nil {
-			return err
-		}
+		hub := slices.Min(n.NodeIDs())
+
 		state.Lock()
 		defer state.Unlock()
-		state.Neighbors = topology.Topologies[msg.Dest]
+		if n.ID() == hub {
+			state.Neighbors = slices.DeleteFunc(slices.Clone(n.NodeIDs()),func(id string) bool { return id == hub })
+		} else {
+			state.Neighbors = []string{hub}
+		}
 		resp := map[string]any{
 			"type": "topology_ok",
 		}
