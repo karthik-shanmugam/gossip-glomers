@@ -65,8 +65,8 @@ func main() {
 			state.Logs[send.Key] = kafkaLog
 		}
 		kafkaLog.Messages = append(kafkaLog.Messages, send.Msg)
-		state.Unlock()
 		offset := len(kafkaLog.Messages) - 1
+		state.Unlock()
 
 		resp := map[string]any{
 			"type":   "send_ok",
@@ -80,9 +80,18 @@ func main() {
 		if err := json.Unmarshal(msg.Body, &poll); err != nil {
 			return err
 		}
-		// TODO: for each key, collect [offset, msg] pairs starting at
-		// poll.Offsets[key].
 		msgs := map[string][][2]int{}
+		state.RLock()
+		for key, start := range poll.Offsets {
+			kafkaLog, ok := state.Logs[key]
+			if ok == false {
+				continue
+			}
+			for offset := max(start, 0); offset < len(kafkaLog.Messages); offset++ {
+				msgs[key] = append(msgs[key], [2]int{offset, kafkaLog.Messages[offset]})
+			}
+		}
+		state.RUnlock()
 
 		resp := map[string]any{
 			"type": "poll_ok",
@@ -96,7 +105,17 @@ func main() {
 		if err := json.Unmarshal(msg.Body, &commitOffsets); err != nil {
 			return err
 		}
-		// TODO: record commitOffsets.Offsets as committed.
+		state.Lock()
+		for key, offset := range commitOffsets.Offsets {
+			kafkaLog, ok := state.Logs[key]
+			if ok == false {
+				kafkaLog = NewLog()
+				state.Logs[key] = kafkaLog
+			}
+			committed := offset
+			kafkaLog.CommittedOffset = &committed
+		}
+		state.Unlock()
 
 		resp := map[string]any{
 			"type": "commit_offsets_ok",
@@ -109,9 +128,17 @@ func main() {
 		if err := json.Unmarshal(msg.Body, &listCommittedOffsets); err != nil {
 			return err
 		}
-		// TODO: look up the committed offset for each key in
-		// listCommittedOffsets.Keys. Keys with no committed offset can be left out.
+		// Keys that have never been committed are left out.
 		offsets := map[string]int{}
+		state.RLock()
+		for _, key := range listCommittedOffsets.Keys {
+			kafkaLog, ok := state.Logs[key]
+			if ok == false || kafkaLog.CommittedOffset == nil {
+				continue
+			}
+			offsets[key] = *kafkaLog.CommittedOffset
+		}
+		state.RUnlock()
 
 		resp := map[string]any{
 			"type":    "list_committed_offsets_ok",
