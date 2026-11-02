@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"log"
+	"sync"
 
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
 )
@@ -39,8 +40,20 @@ type Txn struct {
 	Ops         []Op   `json:"txn"`
 }
 
+type NodeState struct {
+	sync.RWMutex
+	Data map[int]int
+}
+
+func NewNodeState() *NodeState {
+	return &NodeState{
+		Data: make(map[int]int),
+	}
+}
+
 func main() {
 	n := maelstrom.NewNode()
+	state := NewNodeState()
 
 	n.Handle("txn", func(msg maelstrom.Message) error {
 		var txn Txn
@@ -48,16 +61,20 @@ func main() {
 			return err
 		}
 
+		// Hold the lock for the whole transaction so it runs as one step.
+		state.Lock()
 		for i := range txn.Ops {
 			op := &txn.Ops[i]
 			switch op.Kind {
 			case "r":
-				// TODO: set op.Value to the current value of op.Key, or
-				// leave it nil if the key doesn't exist.
+				if value, ok := state.Data[op.Key]; ok {
+					op.Value = &value
+				}
 			case "w":
-				// TODO: write *op.Value to op.Key.
+				state.Data[op.Key] = *op.Value
 			}
 		}
+		state.Unlock()
 
 		resp := map[string]any{
 			"type": "txn_ok",
