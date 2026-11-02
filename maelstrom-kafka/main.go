@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"log"
+	"sync"
 
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
 )
@@ -28,16 +29,44 @@ type ListCommittedOffsets struct {
 	Keys        []string `json:"keys"`
 }
 
+type Log struct {
+	CommittedOffset *int
+	Messages        []int
+}
+
+type State struct {
+	sync.RWMutex
+	Logs map[string]*Log
+}
+
+func NewLog() *Log {
+	return &Log{}
+}
+
+func NewState() *State {
+	return &State{
+		Logs: make(map[string]*Log),
+	}
+}
+
 func main() {
 	n := maelstrom.NewNode()
+	state := NewState()
 
 	n.Handle("send", func(msg maelstrom.Message) error {
 		var send Send
 		if err := json.Unmarshal(msg.Body, &send); err != nil {
 			return err
 		}
-		// TODO: append send.Msg to the log for send.Key and get its offset.
-		offset := 0
+		state.Lock()
+		kafkaLog, ok := state.Logs[send.Key]
+		if ok == false {
+			kafkaLog = NewLog()
+			state.Logs[send.Key] = kafkaLog
+		}
+		kafkaLog.Messages = append(kafkaLog.Messages, send.Msg)
+		state.Unlock()
+		offset := len(kafkaLog.Messages) - 1
 
 		resp := map[string]any{
 			"type":   "send_ok",
