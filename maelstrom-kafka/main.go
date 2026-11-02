@@ -60,7 +60,7 @@ func main() {
 		}
 		state.Lock()
 		kafkaLog, ok := state.Logs[send.Key]
-		if ok == false {
+		if !ok {
 			kafkaLog = NewLog()
 			state.Logs[send.Key] = kafkaLog
 		}
@@ -84,7 +84,7 @@ func main() {
 		state.RLock()
 		for key, start := range poll.Offsets {
 			kafkaLog, ok := state.Logs[key]
-			if ok == false {
+			if !ok {
 				continue
 			}
 			for offset := max(start, 0); offset < len(kafkaLog.Messages); offset++ {
@@ -108,7 +108,7 @@ func main() {
 		state.Lock()
 		for key, offset := range commitOffsets.Offsets {
 			kafkaLog, ok := state.Logs[key]
-			if ok == false {
+			if !ok {
 				kafkaLog = NewLog()
 				state.Logs[key] = kafkaLog
 			}
@@ -133,7 +133,7 @@ func main() {
 		state.RLock()
 		for _, key := range listCommittedOffsets.Keys {
 			kafkaLog, ok := state.Logs[key]
-			if ok == false || kafkaLog.CommittedOffset == nil {
+			if !ok || kafkaLog.CommittedOffset == nil {
 				continue
 			}
 			offsets[key] = *kafkaLog.CommittedOffset
